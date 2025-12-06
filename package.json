@@ -1,0 +1,21 @@
+{
+  "name": "libjsmacho",
+  "version": "1.0.0",
+  "description": "JavaScript library Mach-O parser & editor",
+  "main": "dist/libjsmacho.js",
+  "module": "dist/libjsmacho.js",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "keywords": [
+    "mach-o",
+    "macho",
+    "binary",
+    "parser",
+    "client",
+    "javascript"
+  ],
+  "author": "amorix",
+  "license": "MIT"
+}
