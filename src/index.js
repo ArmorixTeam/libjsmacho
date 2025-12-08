@@ -16,6 +16,7 @@ import { parseLoadCommands, findCommand, replaceCommand } from './macho/loadcomm
 import { parseSegments } from './macho/segments.js';
 import { findCodeSignature, stripCodeSignature, buildEmptyCodeSignature } from './macho/codesig.js';
 import { isFat, parseFat, extractSlice } from './macho/fat.js';
+import { buildSlice } from './macho/builder.js';
 export class MachOFile {
   constructor(input) {
     this._raw = toUint8Array(input);
@@ -62,40 +63,144 @@ export class MachOFile {
     return stripCodeSignature(this.loadCommands);
   }
   addPlaceholderCodeSignature() {
-    this.loadCommands.push({ cmd: 0x1d, cmdsize: 8, off: 0, data: buildEmptyCodeSignature() });
+    // Check if code signature already exists
+    if (findCodeSignature(this.loadCommands)) {
+      throw new Error('Code signature already exists');
+    }
+    
+    // Calculate where the signature data will be placed (at end of file)
+    const originalLoadCommandsEnd = this.header.headerSize + this.header.sizeofcmds;
+    const originalSegmentDataStart = align(originalLoadCommandsEnd, 8);
+    const originalSegmentDataSize = this._slice.length - originalSegmentDataStart;
+    const signatureDataOffset = originalSegmentDataStart + originalSegmentDataSize;
+    
+    // Create code signature command with proper data offset
+    const arr = new Uint8Array(8 + 8); // cmd(4) + cmdsize(4) + dataoff(4) + datasize(4)
+    const dv = new DataView(arr.buffer);
+    const le = this.header.le;
+    dv.setUint32(0, 0x1d, le); // LC_CODE_SIGNATURE
+    dv.setUint32(4, 16, le); // cmdsize
+    dv.setUint32(8, signatureDataOffset, le); // dataoff
+    dv.setUint32(12, 0, le); // datasize (0 for placeholder)
+    
+    this.loadCommands.push({ cmd: 0x1d, cmdsize: 16, off: 0, data: arr });
   }
   setUUID(uuid) {
+    // Validate UUID format
+    const hex = uuid.replace(/-/g, '');
+    if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+      throw new Error('Invalid UUID format');
+    }
+    
     const buf = new Uint8Array(16);
-    const hex = uuid.replace(/-/g,'');
-    for (let i = 0; i < 16; i++) buf[i] = parseInt(hex.substr(i*2,2),16);
-    const uuidCmd = this.loadCommands.find(c=>c.cmd===0x1b);
+    for (let i = 0; i < 16; i++) {
+      buf[i] = parseInt(hex.substr(i * 2, 2), 16);
+    }
+    
+    const uuidCmd = this.loadCommands.find(c => c.cmd === 0x1b);
     if (uuidCmd) {
-      const off = uuidCmd.off + 8;
-      this._writeBytesToSlice(off, buf);
+      // Update existing UUID command
+      const newData = new Uint8Array(uuidCmd.data);
+      newData.set(buf, 8);
+      uuidCmd.data = newData;
     } else {
-      const arr = new Uint8Array(8+16);
+      // Create new UUID command
+      const arr = new Uint8Array(8 + 16);
       const dv = new DataView(arr.buffer);
-      dv.setUint32(0,0x1b,true);
-      dv.setUint32(4,24,true);
-      arr.set(buf,8);
+      dv.setUint32(0, 0x1b, this.header.le);
+      dv.setUint32(4, 24, this.header.le);
+      arr.set(buf, 8);
       this.loadCommands.push({ cmd: 0x1b, cmdsize: 24, off: 0, data: arr });
     }
   }
   injectSegment(name, bytes) {
+    if (!name || name.length === 0 || name.length > 16) {
+      throw new Error('Segment name must be 1-16 characters');
+    }
+    if (!bytes || bytes.length === 0) {
+      throw new Error('Segment data cannot be empty');
+    }
+    
     const n = Math.min(16, name.length);
     const segname = new Uint8Array(16);
-    for (let i=0;i<n;i++) segname[i]=name.charCodeAt(i);
-    const segbuf = new Uint8Array(72 + bytes.length);
-    segbuf.set(new Uint8Array(4).fill(0),0);
+    for (let i = 0; i < n; i++) segname[i] = name.charCodeAt(i);
+    
+    // Calculate where this segment will be placed in the file
+    // It will be appended after existing segment data
+    const originalLoadCommandsEnd = this.header.headerSize + this.header.sizeofcmds;
+    const originalSegmentDataStart = align(originalLoadCommandsEnd, 8);
+    const originalSegmentDataSize = this._slice.length - originalSegmentDataStart;
+    const newFileoff = originalSegmentDataStart + originalSegmentDataSize;
+    
+    // Calculate VM address - place after the last segment's end
+    let maxVmaddr = 0;
+    let maxVmsize = 0;
+    for (const seg of this.segments) {
+      const segEnd = seg.vmaddr + seg.vmsize;
+      if (segEnd > maxVmaddr) {
+        maxVmaddr = segEnd;
+        maxVmsize = seg.vmsize;
+      }
+    }
+    // Align VM address to page boundary (0x1000)
+    const newVmaddr = align(maxVmaddr, 0x1000);
+    
+    const is64 = this.header.is64;
+    const cmdSize = is64 ? 72 + bytes.length : 56 + bytes.length;
+    const segbuf = new Uint8Array(cmdSize);
     const dv = new DataView(segbuf.buffer);
-    dv.setUint32(0,0x19,true);
-    dv.setUint32(4,segbuf.length,true);
-    segbuf.set(segname,8);
-    dv.setUint32(40, align(Math.floor(Math.random()*0x1000),0x1000), true);
-    dv.setUint32(48, bytes.length, true);
-    segbuf.set(bytes, 72);
-    this.loadCommands.push({ cmd: 0x19, cmdsize: segbuf.length, off: 0, data: segbuf });
-    this.segments.push({ name, vmaddr:0, vmsize:bytes.length, fileoff:0, filesize:bytes.length, nsects:0, sects:[], headerOff:0, cmdsize:segbuf.length });
+    const le = this.header.le;
+    
+    // Write command header
+    dv.setUint32(0, is64 ? 0x19 : 0x1, le);
+    dv.setUint32(4, cmdSize, le);
+    
+    // Write segment name
+    segbuf.set(segname, 8);
+    
+    // Write VM address and size
+    if (is64) {
+      const vmaddrLow = Number(BigInt(newVmaddr) & 0xffffffffn);
+      const vmaddrHigh = Number((BigInt(newVmaddr) >> 32n) & 0xffffffffn);
+      dv.setUint32(24, vmaddrLow, le);
+      dv.setUint32(28, vmaddrHigh, le);
+      const vmsizeLow = Number(BigInt(bytes.length) & 0xffffffffn);
+      const vmsizeHigh = Number((BigInt(bytes.length) >> 32n) & 0xffffffffn);
+      dv.setUint32(32, vmsizeLow, le);
+      dv.setUint32(36, vmsizeHigh, le);
+      dv.setUint32(40, newFileoff, le);
+      dv.setUint32(44, 0, le); // fileoff high (always 0 for file offsets)
+      dv.setUint32(48, bytes.length, le);
+      dv.setUint32(52, 0, le); // filesize high
+      dv.setUint32(56, 0, le); // maxprot
+      dv.setUint32(60, 0, le); // initprot
+      dv.setUint32(64, 0, le); // nsects
+      dv.setUint32(68, 0, le); // flags
+      segbuf.set(bytes, 72);
+    } else {
+      dv.setUint32(24, newVmaddr, le);
+      dv.setUint32(28, bytes.length, le);
+      dv.setUint32(32, newFileoff, le);
+      dv.setUint32(36, bytes.length, le);
+      dv.setUint32(40, 0, le); // maxprot
+      dv.setUint32(44, 0, le); // initprot
+      dv.setUint32(48, 0, le); // nsects
+      dv.setUint32(52, 0, le); // flags
+      segbuf.set(bytes, 56);
+    }
+    
+    this.loadCommands.push({ cmd: is64 ? 0x19 : 0x1, cmdsize: cmdSize, off: 0, data: segbuf });
+    this.segments.push({ 
+      name, 
+      vmaddr: newVmaddr, 
+      vmsize: bytes.length, 
+      fileoff: newFileoff, 
+      filesize: bytes.length, 
+      nsects: 0, 
+      sects: [], 
+      headerOff: 0, 
+      cmdsize: cmdSize 
+    });
   }
   patch(offset, data) {
     this._writeBytesToSlice(offset, data);
@@ -104,34 +209,69 @@ export class MachOFile {
     if (this._isFat) {
       const outSlices = [];
       for (let i = 0; i < this._slices.length; i++) {
-        if (i === this.selectedIndex) outSlices.push(this._buildSlice()); else outSlices.push(this._slices[i]);
+        if (i === this.selectedIndex) {
+          // Rebuild the selected slice
+          const rebuilt = this._buildSlice();
+          outSlices.push(new Uint8Array(rebuilt));
+        } else {
+          // Keep other slices as-is (they're already Uint8Array)
+          outSlices.push(this._slices[i] instanceof Uint8Array ? this._slices[i] : new Uint8Array(this._slices[i]));
+        }
       }
-      const total = outSlices.reduce((a,b)=>a+b.byteLength,0) + 8 + this._fat.slices.length*20;
-      const out = new Uint8Array(total);
+      
+      // Calculate fat header size
+      const fatHeaderSize = 8 + this._fat.slices.length * 20;
+      
+      // Align slices according to their alignment requirements
+      let currentOffset = fatHeaderSize;
+      const alignedSlices = [];
+      
+      for (let i = 0; i < outSlices.length; i++) {
+        const slice = outSlices[i];
+        // align field is a power-of-2 exponent (e.g., 12 means 2^12 = 4096)
+        const alignExponent = this._fat.slices[i].align || 12; // Default to 12 (4KB)
+        const alignment = Math.pow(2, alignExponent);
+        currentOffset = align(currentOffset, alignment);
+        alignedSlices.push({ offset: currentOffset, data: slice });
+        currentOffset += slice.byteLength;
+      }
+      
+      // Calculate total size
+      const totalSize = currentOffset;
+      const out = new Uint8Array(totalSize);
       const dv = new DataView(out.buffer);
-      dv.setUint32(0,0xcafebabe,false);
-      dv.setUint32(4,this._fat.nfat,false);
-      let off = 8;
-      let current = 8 + this._fat.nfat*20;
-      for (let i=0;i<this._fat.slices.length;i++) {
+      const le = this._fat.le || false;
+      
+      // Write fat header
+      const magic = this._fat.isCigam ? 0xbebafeca : 0xcafebabe;
+      dv.setUint32(0, magic, false);
+      dv.setUint32(4, this._fat.nfat, le);
+      
+      // Write slice headers and data
+      let headerOff = 8;
+      for (let i = 0; i < alignedSlices.length; i++) {
+        const aligned = alignedSlices[i];
         const s = this._fat.slices[i];
-        dv.setUint32(off, s.cputype, false);
-        dv.setUint32(off+4, s.cpusub, false);
-        dv.setUint32(off+8, current, false);
-        dv.setUint32(off+12, outSlices[i].byteLength, false);
-        dv.setUint32(off+16, s.align, false);
-        off += 20;
-        out.set(new Uint8Array(outSlices[i]), current);
-        current += outSlices[i].byteLength;
+        
+        // Write slice header
+        dv.setUint32(headerOff, s.cputype, le);
+        dv.setUint32(headerOff + 4, s.cpusub, le);
+        dv.setUint32(headerOff + 8, aligned.offset, le);
+        dv.setUint32(headerOff + 12, aligned.data.byteLength, le);
+        dv.setUint32(headerOff + 16, s.align, le);
+        headerOff += 20;
+        
+        // Write slice data
+        out.set(aligned.data, aligned.offset);
       }
+      
       return out.buffer;
     } else {
       return this._buildSlice();
     }
   }
   _buildSlice() {
-    const base = new Uint8Array(this._slice);
-    return base.buffer;
+    return buildSlice(this.header, this.loadCommands, this._slice);
   }
   _writeBytesToSlice(off, bytes) {
     const arr = new Uint8Array(this._slice);

@@ -11,28 +11,68 @@
 */
 
 import { Reader } from '../core/reader.js';
+
 export function isFat(buf) {
+  if (buf.length < 4) return false;
   const dv = new DataView(buf.buffer, buf.byteOffset, 4);
   const magic = dv.getUint32(0, false);
   return magic === 0xcafebabe || magic === 0xbebafeca;
 }
+
 export function parseFat(buf) {
+  if (buf.length < 8) {
+    throw new Error('Fat binary too small');
+  }
+  
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const magic = dv.getUint32(0, false);
-  const nfat = dv.getUint32(4, false);
+  const isCigam = magic === 0xbebafeca;
+  const le = isCigam; // CIGAM means little-endian
+  
+  const nfat = dv.getUint32(4, le);
+  
+  // Bounds check
+  if (nfat < 1 || nfat > 1000) {
+    throw new Error(`Invalid fat binary: nfat_arch = ${nfat}`);
+  }
+  
+  const headerSize = 8 + nfat * 20;
+  if (buf.length < headerSize) {
+    throw new Error('Fat binary header truncated');
+  }
+  
   const slices = [];
   let off = 8;
   for (let i = 0; i < nfat; i++) {
-    const cputype = dv.getUint32(off, false);
-    const cpusub = dv.getUint32(off + 4, false);
-    const offset = dv.getUint32(off + 8, false);
-    const size = dv.getUint32(off + 12, false);
-    const align = dv.getUint32(off + 16, false);
+    if (off + 20 > buf.length) {
+      throw new Error(`Fat binary slice ${i} header truncated`);
+    }
+    
+    const cputype = dv.getUint32(off, le);
+    const cpusub = dv.getUint32(off + 4, le);
+    const offset = dv.getUint32(off + 8, le);
+    const size = dv.getUint32(off + 12, le);
+    const align = dv.getUint32(off + 16, le);
+    
+    // Bounds check slice
+    if (offset < headerSize || offset + size > buf.length) {
+      throw new Error(`Fat binary slice ${i} out of bounds: offset=${offset}, size=${size}, fileSize=${buf.length}`);
+    }
+    
+    if (size === 0) {
+      throw new Error(`Fat binary slice ${i} has zero size`);
+    }
+    
     slices.push({ cputype, cpusub, offset, size, align });
     off += 20;
   }
-  return { magic, nfat, slices };
+  
+  return { magic, nfat, slices, isCigam, le };
 }
+
 export function extractSlice(buf, slice) {
+  if (slice.offset + slice.size > buf.length) {
+    throw new Error('Slice extraction out of bounds');
+  }
   return buf.slice(slice.offset, slice.offset + slice.size);
 }
