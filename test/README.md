@@ -1,5 +1,3 @@
-# Testing libjsmacho
-
 This directory contains test files for the libjsmacho library.
 
 ## Running Tests
