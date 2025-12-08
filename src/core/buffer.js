@@ -10,17 +10,10 @@
 
 */
 
-import { parseLoadCommands } from '../macho/loadcommands.js';
-import { parseHeader } from '../macho/header.js';
-import { stripCodeSignature } from '../macho/codesig.js';
-import { buildSlice } from '../macho/builder.js';
-import { toUint8Array } from '../core/buffer.js';
-
-export function strip(buffer) {
-  const buf = toUint8Array(buffer);
-  const header = parseHeader(buf);
-  const cmds = parseLoadCommands(buf, header);
-  const removed = stripCodeSignature(cmds);
-  if (!removed) return buffer;
-  return buildSlice(header, cmds, buf);
+export function toUint8Array(input) {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (input instanceof Blob) throw new Error('Blob not supported directly');
+  throw new Error('Unsupported buffer input');
 }
+

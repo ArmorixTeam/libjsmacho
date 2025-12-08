@@ -6,7 +6,10 @@
   "module": "dist/libjsmacho.js",
   "type": "module",
   "scripts": {
-    "build": "node build.js"
+    "build": "node build.js",
+    "test": "node --test test/",
+    "test:basic": "node --test test/test-basic.js",
+    "test:integration": "node --test test/test-integration.js"
   },
   "keywords": [
     "mach-o",
