@@ -240,25 +240,28 @@ export class MachOFile {
       const totalSize = currentOffset;
       const out = new Uint8Array(totalSize);
       const dv = new DataView(out.buffer);
-      const le = this._fat.le || false;
       
-      // Write fat header
-      const magic = this._fat.isCigam ? 0xbebafeca : 0xcafebabe;
-      dv.setUint32(0, magic, false);
-      dv.setUint32(4, this._fat.nfat, le);
+      // Fat binary headers must ALWAYS be written in big-endian format
+      // regardless of whether the original was CIGAM or not.
+      // CIGAM is only relevant for reading; we always write standard FAT_MAGIC.
+      const FAT_MAGIC = 0xcafebabe;
       
-      // Write slice headers and data
+      // Write fat header (always big-endian)
+      dv.setUint32(0, FAT_MAGIC, false);
+      dv.setUint32(4, this._fat.nfat, false);
+      
+      // Write slice headers and data (always big-endian)
       let headerOff = 8;
       for (let i = 0; i < alignedSlices.length; i++) {
         const aligned = alignedSlices[i];
         const s = this._fat.slices[i];
         
-        // Write slice header
-        dv.setUint32(headerOff, s.cputype, le);
-        dv.setUint32(headerOff + 4, s.cpusub, le);
-        dv.setUint32(headerOff + 8, aligned.offset, le);
-        dv.setUint32(headerOff + 12, aligned.data.byteLength, le);
-        dv.setUint32(headerOff + 16, s.align, le);
+        // Write slice header (always big-endian)
+        dv.setUint32(headerOff, s.cputype, false);
+        dv.setUint32(headerOff + 4, s.cpusub, false);
+        dv.setUint32(headerOff + 8, aligned.offset, false);
+        dv.setUint32(headerOff + 12, aligned.data.byteLength, false);
+        dv.setUint32(headerOff + 16, s.align, false);
         headerOff += 20;
         
         // Write slice data

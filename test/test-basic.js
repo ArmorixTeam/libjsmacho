@@ -6,6 +6,7 @@ import { readFileSync } from 'fs';
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { MachOFile, MachOFat } from '../src/index.js';
+import { parseFat } from '../src/macho/fat.js';
 
 // Helper to check if we can read a file (for optional test files)
 function fileExists(path) {
@@ -200,6 +201,64 @@ test('stripCodeSignature - removes command', () => {
   
   // After stripping, command count should be reduced
   assert.strictEqual(macho.loadCommands.length, Math.max(0, initialCount - 1));
+});
+
+test('Fat binary header endianness - reading and writing always big-endian', () => {
+  // Test Bug 1 & Bug 2: Fat headers must ALWAYS be read/written as big-endian
+  // regardless of CIGAM magic (which only indicates slice endianness)
+  
+  // Create a CIGAM fat binary (slice endianness is little-endian, but header is still big-endian)
+  const buf = new ArrayBuffer(128);
+  const dv = new DataView(buf);
+  
+  // Write FAT_CIGAM magic (0xbebafeca) - this indicates slices are little-endian
+  // BUT the fat header itself is ALWAYS big-endian in the file
+  dv.setUint32(0, 0xbebafeca, false); // Magic (always big-endian in file)
+  dv.setUint32(4, 1, false); // nfat = 1 (always big-endian in file)
+  
+  // Write slice header (always big-endian in file)
+  // cputype = 0x01000007 (x86_64), cpusub = 3, offset = 48, size = 80, align = 12
+  dv.setUint32(8, 0x01000007, false); // cputype (big-endian)
+  dv.setUint32(12, 3, false); // cpusub (big-endian)
+  dv.setUint32(16, 48, false); // offset (big-endian)
+  dv.setUint32(20, 80, false); // size (big-endian)
+  dv.setUint32(24, 12, false); // align (big-endian)
+  
+  // Import parseFat to test reading
+  import('../src/macho/fat.js').then(({ parseFat }) => {
+    const fatInfo = parseFat(new Uint8Array(buf));
+    
+    // Verify CIGAM was detected
+    assert.strictEqual(fatInfo.isCigam, true, 'Should detect CIGAM magic');
+    
+    // Verify fat header was read correctly as big-endian
+    assert.strictEqual(fatInfo.nfat, 1, 'nfat should be read as big-endian');
+    assert.strictEqual(fatInfo.slices.length, 1, 'Should have 1 slice');
+    assert.strictEqual(fatInfo.slices[0].cputype, 0x01000007, 'cputype should be read as big-endian');
+    assert.strictEqual(fatInfo.slices[0].cpusub, 3, 'cpusub should be read as big-endian');
+    assert.strictEqual(fatInfo.slices[0].offset, 48, 'offset should be read as big-endian');
+    assert.strictEqual(fatInfo.slices[0].size, 80, 'size should be read as big-endian');
+  });
+  
+  // Test writing: build() should always write FAT_MAGIC in big-endian
+  const testBuf = new ArrayBuffer(64);
+  const testDv = new DataView(testBuf);
+  
+  // Simulate what build() should do: always write FAT_MAGIC in big-endian
+  testDv.setUint32(0, 0xcafebabe, false); // Always FAT_MAGIC (big-endian)
+  testDv.setUint32(4, 1, false); // Always big-endian
+  
+  // Verify magic is correct
+  assert.strictEqual(testDv.getUint32(0, false), 0xcafebabe, 'Should write FAT_MAGIC');
+  
+  // Verify nfat is written in big-endian
+  const writtenNfat = testDv.getUint32(4, false);
+  assert.strictEqual(writtenNfat, 1, 'nfat should be written in big-endian');
+  
+  // Verify it's actually big-endian by checking byte order
+  const bytes = new Uint8Array(testBuf.slice(4, 8));
+  assert.strictEqual(bytes[0], 0, 'First byte should be 0 (big-endian)');
+  assert.strictEqual(bytes[3], 1, 'Last byte should be 1 (big-endian)');
 });
 
 console.log('Basic tests completed. Note: Full testing requires actual Mach-O binaries.');

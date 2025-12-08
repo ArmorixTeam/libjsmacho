@@ -27,9 +27,15 @@ export function parseFat(buf) {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const magic = dv.getUint32(0, false);
   const isCigam = magic === 0xbebafeca;
-  const le = isCigam; // CIGAM means little-endian
   
-  const nfat = dv.getUint32(4, le);
+  // Fat binary headers (nfat and slice headers) must ALWAYS be read as big-endian
+  // according to the Mach-O specification, regardless of the magic value.
+  // CIGAM magic indicates that the individual Mach-O slices are little-endian,
+  // but the fat header structure itself is always big-endian.
+  const le = isCigam; // This indicates slice endianness, NOT fat header endianness
+  
+  // Read fat header fields (always big-endian)
+  const nfat = dv.getUint32(4, false);
   
   // Bounds check
   if (nfat < 1 || nfat > 1000) {
@@ -48,11 +54,12 @@ export function parseFat(buf) {
       throw new Error(`Fat binary slice ${i} header truncated`);
     }
     
-    const cputype = dv.getUint32(off, le);
-    const cpusub = dv.getUint32(off + 4, le);
-    const offset = dv.getUint32(off + 8, le);
-    const size = dv.getUint32(off + 12, le);
-    const align = dv.getUint32(off + 16, le);
+    // Read slice header fields (always big-endian)
+    const cputype = dv.getUint32(off, false);
+    const cpusub = dv.getUint32(off + 4, false);
+    const offset = dv.getUint32(off + 8, false);
+    const size = dv.getUint32(off + 12, false);
+    const align = dv.getUint32(off + 16, false);
     
     // Bounds check slice
     if (offset < headerSize || offset + size > buf.length) {
