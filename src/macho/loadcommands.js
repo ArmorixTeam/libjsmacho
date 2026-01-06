@@ -30,13 +30,42 @@ export function parseLoadCommands(buf, header) {
   const r = new Reader(buf, header.le);
   let off = header.headerSize;
   const cmds = [];
+  const maxOffset = header.headerSize + header.sizeofcmds;
+  
+  // Bounds check
+  if (off + header.sizeofcmds > buf.length) {
+    throw new Error(`Load commands extend beyond file: headerSize=${header.headerSize}, sizeofcmds=${header.sizeofcmds}, fileSize=${buf.length}`);
+  }
+  
   for (let i = 0; i < header.ncmds; i++) {
+    // Check if we can read command header
+    if (off + 8 > buf.length) {
+      throw new Error(`Load command ${i} header truncated at offset ${off}`);
+    }
+    
     const cmd = r.u32(off);
     const cmdsize = r.u32(off + 4);
+    
+    // Validate cmdsize
+    if (cmdsize < 8) {
+      throw new Error(`Load command ${i} has invalid size: ${cmdsize} (minimum 8)`);
+    }
+    
+    // Check if command extends beyond declared load commands area
+    if (off + cmdsize > maxOffset) {
+      throw new Error(`Load command ${i} extends beyond sizeofcmds: offset=${off}, size=${cmdsize}, maxOffset=${maxOffset}`);
+    }
+    
+    // Check if command extends beyond file
+    if (off + cmdsize > buf.length) {
+      throw new Error(`Load command ${i} extends beyond file: offset=${off}, size=${cmdsize}, fileSize=${buf.length}`);
+    }
+    
     const data = r.slice(off, cmdsize);
     cmds.push({ cmd, cmdsize, off, data });
     off += cmdsize;
   }
+  
   return cmds;
 }
 export function findCommand(cmds, type) {

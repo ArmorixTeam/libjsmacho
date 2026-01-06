@@ -11,28 +11,75 @@
 */
 
 import { Reader } from '../core/reader.js';
+
 export function isFat(buf) {
+  if (buf.length < 4) return false;
   const dv = new DataView(buf.buffer, buf.byteOffset, 4);
   const magic = dv.getUint32(0, false);
   return magic === 0xcafebabe || magic === 0xbebafeca;
 }
+
 export function parseFat(buf) {
+  if (buf.length < 8) {
+    throw new Error('Fat binary too small');
+  }
+  
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const magic = dv.getUint32(0, false);
+  const isCigam = magic === 0xbebafeca;
+  
+  // Fat binary headers (nfat and slice headers) must ALWAYS be read as big-endian
+  // according to the Mach-O specification, regardless of the magic value.
+  // CIGAM magic indicates that the individual Mach-O slices are little-endian,
+  // but the fat header structure itself is always big-endian.
+  const le = isCigam; // This indicates slice endianness, NOT fat header endianness
+  
+  // Read fat header fields (always big-endian)
   const nfat = dv.getUint32(4, false);
+  
+  // Bounds check
+  if (nfat < 1 || nfat > 1000) {
+    throw new Error(`Invalid fat binary: nfat_arch = ${nfat}`);
+  }
+  
+  const headerSize = 8 + nfat * 20;
+  if (buf.length < headerSize) {
+    throw new Error('Fat binary header truncated');
+  }
+  
   const slices = [];
   let off = 8;
   for (let i = 0; i < nfat; i++) {
+    if (off + 20 > buf.length) {
+      throw new Error(`Fat binary slice ${i} header truncated`);
+    }
+    
+    // Read slice header fields (always big-endian)
     const cputype = dv.getUint32(off, false);
     const cpusub = dv.getUint32(off + 4, false);
     const offset = dv.getUint32(off + 8, false);
     const size = dv.getUint32(off + 12, false);
     const align = dv.getUint32(off + 16, false);
+    
+    // Bounds check slice
+    if (offset < headerSize || offset + size > buf.length) {
+      throw new Error(`Fat binary slice ${i} out of bounds: offset=${offset}, size=${size}, fileSize=${buf.length}`);
+    }
+    
+    if (size === 0) {
+      throw new Error(`Fat binary slice ${i} has zero size`);
+    }
+    
     slices.push({ cputype, cpusub, offset, size, align });
     off += 20;
   }
-  return { magic, nfat, slices };
+  
+  return { magic, nfat, slices, isCigam, le };
 }
+
 export function extractSlice(buf, slice) {
+  if (slice.offset + slice.size > buf.length) {
+    throw new Error('Slice extraction out of bounds');
+  }
   return buf.slice(slice.offset, slice.offset + slice.size);
 }

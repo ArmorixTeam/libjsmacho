@@ -50,12 +50,13 @@ export function parseHeader(buf) {
 }
 export function buildHeader(obj, writer) {
   const dv = writer.dv;
-  dv.setUint32(0, obj.magic, true);
-  dv.setUint32(4, obj.cputype, true);
-  dv.setUint32(8, obj.cpusub, true);
-  dv.setUint32(12, obj.filetype, true);
-  dv.setUint32(16, obj.ncmds, true);
-  dv.setUint32(20, obj.sizeofcmds, true);
-  dv.setUint32(24, obj.flags, true);
-  if (obj.is64) dv.setUint32(28, 0, true);
+  const le = obj.le !== undefined ? obj.le : true;
+  dv.setUint32(0, obj.magic, le);
+  dv.setUint32(4, obj.cputype, le);
+  dv.setUint32(8, obj.cpusub, le);
+  dv.setUint32(12, obj.filetype, le);
+  dv.setUint32(16, obj.ncmds, le);
+  dv.setUint32(20, obj.sizeofcmds, le);
+  dv.setUint32(24, obj.flags, le);
+  if (obj.is64) dv.setUint32(28, 0, le);
 }
